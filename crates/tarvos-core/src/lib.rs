@@ -808,11 +808,11 @@ fn convert_ruff_module(module: ruff::Module) -> tarvos_ast::Module {
 fn convert_ruff_stmt(statement: ruff::Stmt) -> tarvos_ast::Stmt {
     use tarvos_ast::Stmt;
     match statement {
-        ruff::Stmt::Import { module, alias } => Stmt::Import {
-            names: vec![tarvos_ast::ImportName {
-                name: module,
-                asname: (!alias.is_empty()).then_some(alias),
-            }],
+        ruff::Stmt::Import { names } => Stmt::Import {
+            names: names
+                .into_iter()
+                .map(|(name, asname)| tarvos_ast::ImportName { name, asname })
+                .collect(),
         },
         // `from module import a, b` maps onto the same `import_from` shape the
         // CPython exporter produces, so the downstream module resolver has one
@@ -843,25 +843,37 @@ fn convert_ruff_stmt(statement: ruff::Stmt) -> tarvos_ast::Stmt {
             params,
             param_annotations,
             returns,
+            is_async,
             body,
-            ..
-        } => Stmt::FunctionDef {
-            name,
-            args: params,
-            // Parameter and return annotations survive the Ruff front end so that
-            // declared signatures (including recursive calls) stay typed.
-            arg_annotations: param_annotations,
-            body: body.into_iter().map(convert_ruff_stmt).collect(),
-            returns,
-        },
-        ruff::Stmt::Assign { targets, value } => Stmt::Assign {
-            target: targets.into_iter().next().map(convert_ruff_expr).unwrap_or(
-                tarvos_ast::Expr::Tuple {
-                    elements: Vec::new(),
+        } => {
+            if is_async {
+                Stmt::Unsupported {
+                    kind: format!("async function {name}"),
+                }
+            } else {
+                Stmt::FunctionDef {
+                    name,
+                    args: params,
+                    // Parameter and return annotations survive the Ruff front end so that
+                    // declared signatures (including recursive calls) stay typed.
+                    arg_annotations: param_annotations,
+                    body: body.into_iter().map(convert_ruff_stmt).collect(),
+                    returns,
+                }
+            }
+        }
+        ruff::Stmt::Assign { targets, value } => {
+            let mut targets = targets.into_iter();
+            match (targets.next(), targets.next()) {
+                (Some(target), None) => Stmt::Assign {
+                    target: convert_ruff_expr(target),
+                    value: convert_ruff_expr(value),
                 },
-            ),
-            value: convert_ruff_expr(value),
-        },
+                _ => Stmt::Unsupported {
+                    kind: "multiple assignment targets".to_owned(),
+                },
+            }
+        }
         ruff::Stmt::Expr(value) => Stmt::Expr {
             value: convert_ruff_expr(value),
         },
@@ -875,12 +887,23 @@ fn convert_ruff_stmt(statement: ruff::Stmt) -> tarvos_ast::Stmt {
             body: body.into_iter().map(convert_ruff_stmt).collect(),
         },
         ruff::Stmt::For {
-            target, iter, body, ..
-        } => Stmt::For {
-            target: convert_ruff_expr(target),
-            iter: convert_ruff_expr(iter),
-            body: body.into_iter().map(convert_ruff_stmt).collect(),
-        },
+            target,
+            iter,
+            body,
+            is_async,
+        } => {
+            if is_async {
+                Stmt::Unsupported {
+                    kind: "async for".to_owned(),
+                }
+            } else {
+                Stmt::For {
+                    target: convert_ruff_expr(target),
+                    iter: convert_ruff_expr(iter),
+                    body: body.into_iter().map(convert_ruff_stmt).collect(),
+                }
+            }
+        }
         ruff::Stmt::Return(value) => Stmt::Return {
             value: value.map(convert_ruff_expr),
         },
@@ -914,11 +937,7 @@ fn convert_ruff_stmt(statement: ruff::Stmt) -> tarvos_ast::Stmt {
             orelse: orelse.into_iter().map(convert_ruff_stmt).collect(),
             finalbody: finalbody.into_iter().map(convert_ruff_stmt).collect(),
         },
-        ruff::Stmt::Unsupported { kind } => Stmt::Expr {
-            value: tarvos_ast::Expr::String {
-                value: format!("unsupported Ruff node: {kind}"),
-            },
-        },
+        ruff::Stmt::Unsupported { kind } => Stmt::Unsupported { kind },
     }
 }
 
@@ -1016,6 +1035,11 @@ fn convert_ruff_expr(expression: ruff::Expr) -> tarvos_ast::Expr {
             operator,
             values: values.into_iter().map(convert_ruff_expr).collect(),
         },
+        ruff::Expr::IfExp { test, body, orelse } => Expr::IfExp {
+            test: Box::new(convert_ruff_expr(*test)),
+            body: Box::new(convert_ruff_expr(*body)),
+            orelse: Box::new(convert_ruff_expr(*orelse)),
+        },
         ruff::Expr::Unary { operator, operand } => Expr::Unary {
             operator: match operator {
                 ruff::UnaryOperator::UAdd => "uadd",
@@ -1053,18 +1077,30 @@ fn convert_ruff_expr(expression: ruff::Expr) -> tarvos_ast::Expr {
             .to_string()],
             comparators: vec![convert_ruff_expr(*right)],
         },
-        ruff::Expr::Call { function, args } => {
+        ruff::Expr::Call {
+            function,
+            args,
+            keywords,
+        } => {
             let args = args.into_iter().map(convert_ruff_expr).collect();
-            match *function {
-                ruff::Expr::Attribute { object, attribute } => Expr::MethodCall {
-                    object: Box::new(convert_ruff_expr(*object)),
-                    method: attribute,
-                    args,
-                },
-                function => Expr::Call {
+            match (*function, keywords) {
+                (ruff::Expr::Attribute { object, attribute }, keywords) if keywords.is_empty() => {
+                    Expr::MethodCall {
+                        object: Box::new(convert_ruff_expr(*object)),
+                        method: attribute,
+                        args,
+                    }
+                }
+                (function, keywords) => Expr::Call {
                     function: Box::new(convert_ruff_expr(function)),
                     args,
-                    keywords: Vec::new(),
+                    keywords: keywords
+                        .into_iter()
+                        .map(|(arg, value)| tarvos_ast::Keyword {
+                            arg,
+                            value: convert_ruff_expr(value),
+                        })
+                        .collect(),
                 },
             }
         }
@@ -1072,7 +1108,9 @@ fn convert_ruff_expr(expression: ruff::Expr) -> tarvos_ast::Expr {
             value: Box::new(convert_ruff_expr(*object)),
             attr: attribute,
         },
-        ruff::Expr::Await(value) => convert_ruff_expr(*value),
+        ruff::Expr::Await(_) => Expr::Unsupported {
+            kind: "await expression".to_owned(),
+        },
         // The bridge only carries a lambda where a call desugar produced one
         // (a `sorted(key=)` argument), already validated to a single
         // parameter. Any other shape never gets this far: the bridge reports
@@ -1081,9 +1119,7 @@ fn convert_ruff_expr(expression: ruff::Expr) -> tarvos_ast::Expr {
             args,
             body: Box::new(convert_ruff_expr(*body)),
         },
-        ruff::Expr::Unsupported { kind } => Expr::String {
-            value: format!("unsupported Ruff expression: {kind}"),
-        },
+        ruff::Expr::Unsupported { kind } => Expr::Unsupported { kind },
     }
 }
 
