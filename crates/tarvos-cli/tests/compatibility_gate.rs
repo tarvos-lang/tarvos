@@ -2,16 +2,23 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+static NEXT_PROJECT_ID: AtomicU64 = AtomicU64::new(0);
+
 fn temporary_project(name: &str) -> PathBuf {
+    let id = NEXT_PROJECT_ID.fetch_add(1, Ordering::Relaxed);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock must be after Unix epoch")
         .as_nanos();
-    let path =
-        std::env::temp_dir().join(format!("tarvos-cli-{name}-{}-{stamp}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "tarvos-cli-{name}-{}-{}-{id}",
+        std::process::id(),
+        stamp
+    ));
     fs::create_dir_all(&path).expect("create CLI compatibility test directory");
     path
 }
@@ -33,6 +40,32 @@ fn run_tarvos(project: &Path, args: &[&str]) -> std::process::Output {
 
 fn cleanup(project: PathBuf) {
     let _ = fs::remove_dir_all(project);
+}
+
+fn assert_compile_rejected(project: &Path, source: &str, diagnostic: &str) {
+    write_program(project, source);
+    let output = run_tarvos(
+        project,
+        &[
+            "build",
+            "main.py",
+            "--source-only",
+            "--strict-native",
+            "-o",
+            "main.exe",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "expected native compilation to reject the source:\n{source}\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(diagnostic) || stdout.contains(diagnostic),
+        "expected diagnostic {diagnostic:?}:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 }
 
 /// Assert a program ran natively (no CPython fallback) and printed `expected`.
@@ -217,6 +250,102 @@ fn string_methods_run_natively() {
         ],
     );
     cleanup(project);
+}
+
+#[test]
+fn unsupported_scope_mutation_and_print_keywords_are_rejected() {
+    let cases = [
+        (
+            "global value\n",
+            "`global` declarations are not supported natively",
+        ),
+        (
+            "def outer():\n\
+             \x20   value = 1\n\
+             \x20   def inner():\n\
+             \x20       nonlocal value\n\
+             \x20       value = 2\n",
+            "`nonlocal` declarations are not supported natively",
+        ),
+        ("value = 1\ndel value\n", "`del` statements are not supported natively"),
+        (
+            "print('a', 'b', sep='-')\n",
+            "`print()` keyword arguments such as `sep` and `end` are not supported natively",
+        ),
+        (
+            "print('a', end='')\n",
+            "`print()` keyword arguments such as `sep` and `end` are not supported natively",
+        ),
+    ];
+
+    for (index, (source, diagnostic)) in cases.iter().enumerate() {
+        let project = temporary_project(&format!("unsupported-syntax-{index}"));
+        assert_compile_rejected(&project, source, diagnostic);
+        cleanup(project);
+    }
+}
+
+#[test]
+fn branching_bool_string_rebind_runs_natively() {
+    let project = temporary_project("branching-bool-string-rebind");
+    assert_native_output(
+        &project,
+        "import time\n\
+         value = True\n\
+         if time.perf_counter() >= 0:\n\
+         \x20   value = 'Hello'\n\
+         print(value)\n",
+        &["Hello"],
+    );
+    cleanup(project);
+}
+
+#[test]
+fn loop_bool_string_rebind_runs_natively() {
+    let project = temporary_project("loop-bool-string-rebind");
+    assert_native_output(
+        &project,
+        "value = True\n\
+         for index in range(1):\n\
+         \x20   value = 'Hello'\n\
+         print(value)\n",
+        &["Hello"],
+    );
+    cleanup(project);
+}
+
+#[test]
+fn syntax_dropped_by_the_ast_bridge_is_rejected() {
+    let cases = [
+        (
+            "def value(x=1):\n\
+             \x20   return x\n",
+            "function defaults and variadic parameters are not supported natively",
+        ),
+        (
+            "for value in range(2):\n\
+             \x20   pass\n\
+             else:\n\
+             \x20   print('done')\n",
+            "for-else suites are not supported natively",
+        ),
+        (
+            "async def value():\n\
+             \x20   return 1\n",
+            "async functions are not supported natively",
+        ),
+        (
+            "async def value():\n\
+             \x20   return await other()\n",
+            "async functions are not supported natively",
+        ),
+    ];
+
+    for (index, (source, diagnostic)) in cases.iter().enumerate() {
+        let project = temporary_project(&format!("unsupported-ast-{index}"));
+        assert_compile_rejected(&project, source, diagnostic);
+        cleanup(project);
+    }
 }
 
 #[test]

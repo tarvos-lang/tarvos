@@ -22,6 +22,9 @@ impl TypeInference {
 
     pub fn infer_expr(&self, expr: &tarvos_ast::Expr) -> Result<Type> {
         match expr {
+            tarvos_ast::Expr::Unsupported { kind } => {
+                Err(anyhow!("unsupported Python expression: {}", kind))
+            }
             tarvos_ast::Expr::Int { .. } | tarvos_ast::Expr::BigInt { .. } => Ok(Type::Int),
             tarvos_ast::Expr::Float { .. } => Ok(Type::Float),
             tarvos_ast::Expr::String { .. } => Ok(Type::String),

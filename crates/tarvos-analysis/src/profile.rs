@@ -152,6 +152,9 @@ fn analyze_stmt(stmt: &Stmt, stats: &mut ProfileStats) {
                 analyze_stmt(stmt, stats);
             }
         }
+        Stmt::Unsupported { .. } => {
+            stats.statements += 1;
+        }
         Stmt::With { items, body } => {
             stats.statements += 1;
             for item in items {
@@ -287,6 +290,7 @@ fn analyze_expr(expr: &Expr, stats: &mut ProfileStats) {
         | Expr::Float { .. }
         | Expr::String { .. }
         | Expr::Bool { .. }
+        | Expr::Unsupported { .. }
         | Expr::None
         | Expr::Attribute { .. }
         | Expr::BoolOp { .. }

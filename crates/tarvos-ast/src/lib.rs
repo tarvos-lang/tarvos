@@ -9,6 +9,9 @@ pub struct Module {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum Stmt {
+    #[serde(rename = "unsupported")]
+    Unsupported { kind: String },
+
     #[serde(rename = "import")]
     Import { names: Vec<ImportName> },
 
@@ -146,6 +149,9 @@ pub struct ImportName {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum Expr {
+    #[serde(rename = "unsupported")]
+    Unsupported { kind: String },
+
     #[serde(rename = "name")]
     Name { id: String },
 
@@ -288,6 +294,7 @@ impl Expr {
     /// Get a debug representation suitable for error messages
     pub fn kind_name(&self) -> &'static str {
         match self {
+            Expr::Unsupported { .. } => "unsupported expression",
             Expr::Name { .. } => "name",
             Expr::Int { .. } => "int",
             Expr::BigInt { .. } => "big integer",

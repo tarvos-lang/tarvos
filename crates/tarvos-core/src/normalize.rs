@@ -197,6 +197,7 @@ fn normalize_stmt(stmt: Stmt, counter: &mut usize, taken: &mut HashSet<String>) 
 
 fn normalize_expr(expr: Expr, counter: &mut usize, taken: &mut HashSet<String>) -> Expr {
     match expr {
+        Expr::Unsupported { kind } => Expr::Unsupported { kind },
         Expr::Name { id } => Expr::Name { id },
         Expr::Int { value } => Expr::Int { value },
         Expr::BigInt { value } => Expr::BigInt { value },

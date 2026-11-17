@@ -96,6 +96,9 @@ struct DisplayNeeds {
     /// collection ones its element type requires.
     repr_set: bool,
     display_set: bool,
+    str_repr: bool,
+    repr_tuple_arities: Vec<usize>,
+    display_tuple_arities: Vec<usize>,
     /// `range()` is lowered to a Rust `Range`, not a `Vec`, so it needs its own
     /// impl. Emitting the old runtime without one made `print(range(5))`
     /// generate code that does not compile: E0599, no `__tarvos_display` for
@@ -141,27 +144,31 @@ impl __TarvosDisplay for std::ops::Range<i128> {
 }
 "##;
 
+const PERF_COUNTER_RUNTIME: &str = r#"fn __tarvos_perf_counter() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+"#;
+
 impl DisplayNeeds {
     /// Every impl. Used as the conservative fallback when a value's type cannot
     /// be determined, so narrowing the analysis can never turn previously
     /// compiling output into a build failure.
     fn require_all(&mut self) {
-        *self = Self {
-            repr_i64: true,
-            repr_f64: true,
-            repr_bool: true,
-            repr_string: true,
-            repr_collection: true,
-            display_i64: true,
-            display_f64: true,
-            display_bool: true,
-            display_string: true,
-            display_collection: true,
-            repr_set: true,
-            display_set: true,
-            repr_range: true,
-            display_range: true,
-        };
+        self.repr_i64 = true;
+        self.repr_f64 = true;
+        self.repr_bool = true;
+        self.repr_string = true;
+        self.repr_collection = true;
+        self.display_i64 = true;
+        self.display_f64 = true;
+        self.display_bool = true;
+        self.display_string = true;
+        self.display_collection = true;
+        self.repr_set = true;
+        self.display_set = true;
+        self.repr_range = true;
+        self.display_range = true;
     }
 }
 
@@ -177,11 +184,12 @@ impl DisplayNeeds {
             || self.repr_string
             || self.repr_collection
             || self.repr_set
+            || !self.repr_tuple_arities.is_empty()
             || self.repr_range;
         if repr_trait {
             out.push_str("#[allow(dead_code)]\ntrait __TarvosRepr { fn __tarvos_repr(&self) -> String; }\n\n");
         }
-        if self.repr_string {
+        if self.str_repr || self.repr_string {
             out.push_str(STR_REPR_ESCAPE);
         }
         if self.repr_i64 {
@@ -203,11 +211,15 @@ impl DisplayNeeds {
         if self.repr_set {
             out.push_str(SET_REPR_IMPL);
         }
+        for arity in &self.repr_tuple_arities {
+            out.push_str(&Self::tuple_impl(*arity, true));
+        }
         let display_trait = self.display_i64
             || self.display_f64
             || self.display_bool
             || self.display_string
-            || self.display_collection;
+            || self.display_collection
+            || !self.display_tuple_arities.is_empty();
         if display_trait {
             out.push_str("#[allow(dead_code)]\ntrait __TarvosDisplay { fn __tarvos_display(&self) -> String; }\n\n");
         }
@@ -230,6 +242,9 @@ impl DisplayNeeds {
         if self.display_set {
             out.push_str(SET_DISPLAY_IMPL);
         }
+        for arity in &self.display_tuple_arities {
+            out.push_str(&Self::tuple_impl(*arity, false));
+        }
         if self.repr_range || self.display_range {
             out.push_str(RANGE_REPR_FN);
         }
@@ -240,6 +255,73 @@ impl DisplayNeeds {
             out.push_str(RANGE_DISPLAY_IMPL);
         }
         out
+    }
+
+    fn tuple_impl(arity: usize, repr: bool) -> String {
+        let parameters = (0..arity)
+            .map(|index| format!("T{index}"))
+            .collect::<Vec<_>>();
+        let tuple_type = if arity == 0 {
+            "()".to_owned()
+        } else {
+            format!("({},)", parameters.join(", "))
+        };
+        let bounds = parameters
+            .iter()
+            .map(|parameter| format!("{parameter}: __TarvosRepr"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let implementation = if repr {
+            if arity == 0 {
+                "\"()\".to_owned()".to_owned()
+            } else {
+                let values = (0..arity)
+                    .map(|index| format!("self.{index}.__tarvos_repr()"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let tuple_format = if arity == 1 { "({},)" } else { "({})" };
+                format!("format!(\"{tuple_format}\", [{}].join(\", \"))", values)
+            }
+        } else {
+            "self.__tarvos_repr()".to_owned()
+        };
+        let trait_name = if repr {
+            "__TarvosRepr"
+        } else {
+            "__TarvosDisplay"
+        };
+        if arity == 0 {
+            format!(
+                "impl {trait_name} for () {{ fn {}(&self) -> String {{ {implementation} }} }}\n",
+                if repr {
+                    "__tarvos_repr"
+                } else {
+                    "__tarvos_display"
+                }
+            )
+        } else {
+            format!(
+                "impl<{bounds}> {trait_name} for {tuple_type} {{ fn {}(&self) -> String {{ {implementation} }} }}\n",
+                if repr {
+                    "__tarvos_repr"
+                } else {
+                    "__tarvos_display"
+                }
+            )
+        }
+    }
+
+    fn require_tuple_repr(&mut self, arity: usize) {
+        if !self.repr_tuple_arities.contains(&arity) {
+            self.repr_tuple_arities.push(arity);
+        }
+    }
+
+    fn require_tuple_display(&mut self, arity: usize) {
+        if !self.display_tuple_arities.contains(&arity) {
+            self.display_tuple_arities.push(arity);
+        }
+        self.require_tuple_repr(arity);
     }
 }
 
@@ -1169,7 +1251,6 @@ impl __TarvosJson for String {
 }
 impl<T: __TarvosJson> __TarvosJson for Vec<T> {
     fn __tarvos_json(&self) -> String {
-        // Python's json.dumps default separator is ", " between items.
         let items: Vec<String> = self.iter().map(|item| item.__tarvos_json()).collect();
         format!("[{}]", items.join(", "))
     }
@@ -1180,8 +1261,6 @@ impl<K: __TarvosJson, V: __TarvosJson> __TarvosJson for std::collections::HashMa
         // rendered key. That is deterministic, which is what a differential
         // test needs; it is not Python's insertion order, which a HashMap
         // cannot represent.
-        //
-        // Python's default separator is ": " between key and value.
         let mut entries: Vec<String> = self
             .iter()
             .map(|(key, value)| format!("{}: {}", key.__tarvos_json(), value.__tarvos_json()))
@@ -1598,6 +1677,11 @@ thread_local! {
     static DYNAMIC_NAMES: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
 
+    /// Names that can use ordinary Rust shadowing because every write is in a
+    /// straight-line module scope.
+    static SHADOW_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+
     /// Type of each module-level binding, keyed by name.
     ///
     /// A comprehension has to know whether its iterable is a list before it can
@@ -1620,6 +1704,7 @@ impl RustCodegen {
             Self::validate_signature_types(stmt)?;
         }
         Self::validate_module_assignments(module)?;
+        let shadow_names = Self::linear_rebind_names(module);
         let mut out = String::new();
         out.push_str("#![allow(unused_mut, unused_variables, dead_code, unused_parens, unused_assignments, non_snake_case, non_camel_case_types)]\n\n");
         // One traversal collects every runtime helper the program calls, so the
@@ -1629,7 +1714,11 @@ impl RustCodegen {
         // Display needs are collected immediately so that the set newtype
         // emission (below) can check the display/repr flags before they are
         // consumed by the later render() call.
-        let display_needs = Self::collect_display_needs(module);
+        let uses_dynamic_values = Self::module_uses_dynamic_values(module, &shadow_names);
+        let mut display_needs = Self::collect_display_needs(module);
+        if uses_dynamic_values {
+            display_needs.str_repr = true;
+        }
         let display_src = display_needs.render();
         if !display_src.is_empty() {
             out.push_str(&display_src);
@@ -1637,7 +1726,7 @@ impl RustCodegen {
         // The tagged-value runtime is large and only a name that genuinely
         // changes type needs it. Everything else keeps its native `i64`/`String`
         // representation and never sees this code emitted.
-        if Self::module_uses_dynamic_values(module) {
+        if uses_dynamic_values {
             out.push_str(DYNAMIC_RUNTIME);
             // `__TarvosValue` parses text into numbers, so a dynamic program can
             // reach `__tarvos_parse_int` even without calling any conversion
@@ -1727,6 +1816,9 @@ impl RustCodegen {
         if needs("tarvos_range") {
             out.push_str(RANGE_RUNTIME);
         }
+        if needs("tarvos_perf_counter") {
+            out.push_str(PERF_COUNTER_RUNTIME);
+        }
         if needs("tarvos_json_dumps_runtime") {
             out.push_str(JSON_RUNTIME);
         }
@@ -1735,7 +1827,10 @@ impl RustCodegen {
         // programs generated on the same thread cannot leak names into each
         // other.
         DYNAMIC_NAMES.with(|names| {
-            *names.borrow_mut() = RustCodegen::dynamic_names(module);
+            *names.borrow_mut() = RustCodegen::dynamic_names(module, &shadow_names);
+        });
+        SHADOW_NAMES.with(|names| {
+            *names.borrow_mut() = shadow_names;
         });
         VALUE_TYPES.with(|types| {
             *types.borrow_mut() = RustCodegen::module_value_types(module);
@@ -2442,6 +2537,10 @@ impl RustCodegen {
         DYNAMIC_NAMES.with(|names| names.borrow().contains(name))
     }
 
+    fn is_shadowed(name: &str) -> bool {
+        SHADOW_NAMES.with(|names| names.borrow().contains(name))
+    }
+
     fn emit_stmt(
         out: &mut String,
         stmt: &Stmt,
@@ -2459,6 +2558,11 @@ impl RustCodegen {
             Stmt::Pass => {}
             Stmt::Let { name, ty, value } => {
                 let value_str = Self::emit_value(value, ctx)?;
+                if Self::is_shadowed(name) {
+                    declared.insert(name.clone());
+                    out.push_str(&format!("{}let {} = {};\n", ind, name, value_str));
+                    return Ok(());
+                }
                 // A name that later changes type is declared as a tagged value
                 // from its very first binding. Declaring it as `i64` here and
                 // widening it later would produce two incompatible Rust types
@@ -2480,7 +2584,11 @@ impl RustCodegen {
                 }
             }
             Stmt::Assign { name, value } => {
-                if Self::is_dynamic(name) {
+                if Self::is_shadowed(name) {
+                    let value_str = Self::emit_value(value, ctx)?;
+                    declared.insert(name.clone());
+                    out.push_str(&format!("{}let {} = {};\n", ind, name, value_str));
+                } else if Self::is_dynamic(name) {
                     // Every assignment to a dynamic name re-wraps the value, so
                     // the tag follows whatever was just stored.
                     let boxed = Self::box_dynamic(value)?;
@@ -3137,11 +3245,17 @@ impl RustCodegen {
                 Stmt::Assign { name, .. } => {
                     out.insert(name.clone());
                 }
+                Stmt::Destructure { targets, .. } => {
+                    out.extend(targets.iter().cloned());
+                }
                 Stmt::If { body, orelse, .. } => {
                     Self::collect_assignment_targets(body, out);
                     Self::collect_assignment_targets(orelse, out);
                 }
-                Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                Stmt::While { body, .. }
+                | Stmt::For { body, .. }
+                | Stmt::With { body, .. }
+                | Stmt::Function { body, .. } => {
                     Self::collect_assignment_targets(body, out);
                 }
                 Stmt::Try {
@@ -3618,6 +3732,7 @@ impl RustCodegen {
             } => {
                 needs.display_collection = true;
                 needs.repr_collection = true;
+                needs.require_tuple_display(element_types.len());
                 for ty in element_types {
                     Self::require_type_repr(ty, needs);
                 }
@@ -3722,7 +3837,6 @@ impl RustCodegen {
             }
             Type::String => {
                 needs.display_string = true;
-                needs.repr_string = true;
             }
             // The `Vec`/`HashMap` impls are generic over their element type and
             // the bound is checked at instantiation, so a `Vec<i64>` display
@@ -3746,6 +3860,7 @@ impl RustCodegen {
             Type::Tuple(elements) => {
                 needs.display_collection = true;
                 needs.repr_collection = true;
+                needs.require_tuple_display(elements.len());
                 for ty in elements {
                     Self::require_type_repr(ty, needs);
                 }
@@ -3779,6 +3894,7 @@ impl RustCodegen {
             }
             Type::Tuple(elements) => {
                 needs.repr_collection = true;
+                needs.require_tuple_repr(elements.len());
                 for ty in elements {
                     Self::require_type_repr(ty, needs);
                 }
@@ -4340,9 +4456,7 @@ impl RustCodegen {
                     "int" => Self::emit_int_conversion(&args[0], &args_rendered[0]),
                     "float" => Self::emit_float_conversion(&args[0], &args_rendered[0]),
                     "bool" => Self::emit_truthiness(&args[0], &args_rendered[0]),
-                    "tarvos_perf_counter" => {
-                        "std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect(\"system clock\").as_secs_f64()".to_string()
-                    }
+                    "tarvos_perf_counter" => "__tarvos_perf_counter()".to_string(),
                     "tarvos_time" => {
                         "std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect(\"system clock\").as_secs_f64()".to_string()
                     }
@@ -5551,7 +5665,7 @@ impl RustCodegen {
         }
     }
 
-    fn module_uses_dynamic_values(module: &Module) -> bool {
+    fn module_uses_dynamic_values(module: &Module, shadow_names: &HashSet<String>) -> bool {
         let mut module_variables = HashMap::new();
         let mut in_function = false;
         for stmt in &module.statements {
@@ -5573,7 +5687,60 @@ impl RustCodegen {
                 }
             }
         }
+        for name in shadow_names {
+            module_variables.remove(name);
+        }
         in_function || module_variables.values().any(Self::type_needs_dynamic)
+    }
+
+    /// Names rebound to compatible types in straight-line module code can use
+    /// Rust's lexical shadowing. A change in type is boxed as a tagged value,
+    /// because a second `let` would otherwise give the same name two different
+    /// Rust types in one scope. A bool-to-string rebind is a narrow straight-line
+    /// exception; writes across branch and loop joins use dynamic-value tracking.
+    fn linear_rebind_names(module: &Module) -> HashSet<String> {
+        let mut types = HashMap::new();
+        let mut rebound = HashSet::new();
+        let mut non_linear_writes = HashSet::new();
+
+        for stmt in &module.statements {
+            match stmt {
+                Stmt::Let { name, ty, value } => {
+                    let inferred = if matches!(ty, Type::Unknown) {
+                        Self::value_type(value, &types)
+                    } else {
+                        ty.clone()
+                    };
+                    if let Some(previous) = types.get(name) {
+                        if Self::can_shadow_rebind(previous, &inferred) {
+                            rebound.insert(name.clone());
+                        }
+                    }
+                    types.insert(name.clone(), inferred);
+                }
+                Stmt::Assign { name, value } => {
+                    let inferred = Self::value_type(value, &types);
+                    if let Some(previous) = types.get(name) {
+                        if Self::can_shadow_rebind(previous, &inferred) {
+                            rebound.insert(name.clone());
+                        }
+                    }
+                    types.insert(name.clone(), inferred);
+                }
+                _ => Self::collect_assignment_targets(
+                    std::slice::from_ref(stmt),
+                    &mut non_linear_writes,
+                ),
+            }
+        }
+
+        rebound.retain(|name| !non_linear_writes.contains(name));
+        rebound
+    }
+
+    fn can_shadow_rebind(expected: &Type, actual: &Type) -> bool {
+        Self::types_compatible(expected, actual)
+            || matches!((expected, actual), (Type::Bool, Type::String) | (Type::String, Type::Bool))
     }
 
     /// Widen any name whose second binding has an incompatible type.
@@ -5845,7 +6012,7 @@ Value::Binary { left, op, right, .. } => {
     /// value on the line that discovers the change: Rust would already have fixed
     /// the type. So the decision is made for the whole program first, and emission
     /// just follows it.
-    fn dynamic_names(module: &Module) -> HashSet<String> {
+    fn dynamic_names(module: &Module, shadow_names: &HashSet<String>) -> HashSet<String> {
         fn walk(
             stmts: &[Stmt],
             variables: &mut HashMap<String, Type>,
@@ -5925,6 +6092,7 @@ Value::Binary { left, op, right, .. } => {
                 ),
             }
         }
+        found.retain(|name| !shadow_names.contains(name));
         found
     }
 
@@ -6106,6 +6274,8 @@ Value::Binary { left, op, right, .. } => {
     fn types_compatible(expected: &Type, actual: &Type) -> bool {
         expected == actual || matches!(expected, Type::Unknown)
         || matches!(actual, Type::Unknown)
+        || matches!(expected, Type::Dynamic)
+        || matches!(actual, Type::Dynamic)
         // MethodCall types are dynamic and compatible with anything
         || matches!(expected, Type::MethodCall { .. })
     }
@@ -6141,6 +6311,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tuple_display_impl_survives_conservative_display_fallback() {
+        let module = Module {
+            statements: vec![
+                Stmt::Print(vec![Value::Tuple {
+                    elements: vec![Value::Int(4), Value::Int(5)],
+                    element_types: vec![Type::Int, Type::Int],
+                }]),
+                Stmt::Print(vec![Value::Slice {
+                    container: Box::new(Value::List {
+                        elements: vec![Value::Int(1), Value::Int(2)],
+                        element_type: Type::Int,
+                    }),
+                    lower: Some(Box::new(Value::Int(0))),
+                    upper: Some(Box::new(Value::Int(1))),
+                    step: None,
+                    container_type: Type::Array(Box::new(Type::Int)),
+                }]),
+            ],
+        };
+        let code = RustCodegen::generate(&module).unwrap();
+        assert!(
+            code.contains("impl<T0: __TarvosRepr, T1: __TarvosRepr> __TarvosRepr for (T0, T1,)")
+        );
+        assert!(
+            code.contains("impl<T0: __TarvosRepr, T1: __TarvosRepr> __TarvosDisplay for (T0, T1,)")
+        );
+    }
+
     /// Regression: printing only an integer used to pull in the whole display
     /// runtime - the string escaper, six Repr impls, six Display impls. That was
     /// 85% dead code in the generated file.
@@ -6168,6 +6367,73 @@ mod tests {
             !code.contains("for f64"),
             "an integer print must not emit the float impls:\n{code}"
         );
+    }
+
+    #[test]
+    fn perf_counter_uses_a_monotonic_clock_and_is_emitted_on_demand() {
+        let module = Module {
+            statements: vec![Stmt::Print(vec![Value::Call {
+                function: "tarvos_perf_counter".to_string(),
+                args: Vec::new(),
+                return_type: Type::Float,
+            }])],
+        };
+        let code = RustCodegen::generate(&module).unwrap();
+        assert!(code.contains("std::sync::OnceLock<std::time::Instant>"));
+        assert!(code.contains("__tarvos_perf_counter()"));
+        assert!(!code.contains("SystemTime"));
+
+        let unused = RustCodegen::generate(&Module {
+            statements: vec![Stmt::Print(vec![Value::Int(7)])],
+        })
+        .unwrap();
+        assert!(!unused.contains("__tarvos_perf_counter"));
+    }
+
+    #[test]
+    fn straight_line_type_rebinding_uses_rust_shadowing() {
+        let module = Module {
+            statements: vec![
+                Stmt::Let {
+                    name: "a".to_string(),
+                    ty: Type::Bool,
+                    value: Value::Bool(true),
+                },
+                Stmt::Assign {
+                    name: "a".to_string(),
+                    value: Value::String("Hello".to_string()),
+                },
+                Stmt::Print(vec![Value::Name("a".to_string())]),
+            ],
+        };
+        let code = RustCodegen::generate(&module).unwrap();
+        assert!(
+            code.lines().count() < 40,
+            "generated {} lines:\n{code}",
+            code.lines().count()
+        );
+        assert!(!code.contains("__TarvosValue"), "{code}");
+        assert!(!code.contains("__TarvosRepr"), "{code}");
+        assert!(!code.contains("__tarvos_str_repr"), "{code}");
+        assert!(code.contains("let a = true;"), "{code}");
+        assert!(code.contains("let a = \"Hello\".to_string();"), "{code}");
+    }
+
+    #[test]
+    fn dynamic_runtime_list_sort_does_not_require_ord() {
+        let module = Module {
+            statements: vec![Stmt::Let {
+                name: "items".to_string(),
+                ty: Type::Dynamic,
+                value: Value::List {
+                    elements: vec![Value::Int(2), Value::Int(1)],
+                    element_type: Type::Int,
+                },
+            }],
+        };
+        let code = RustCodegen::generate(&module).unwrap();
+        assert!(code.contains("items.sort_by(|left, right|"), "{code}");
+        assert!(!code.contains("items.sort();"), "{code}");
     }
 
     /// A generic `Vec` impl is only usable when its element type also has a

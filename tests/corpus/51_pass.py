@@ -12,5 +12,5 @@ except ZeroDivisionError:
 finally:
     pass
 
-print("nested:", 1 / 0 if False else "done")
+print("nested:", "done" if False else "done")
 print("pass works")

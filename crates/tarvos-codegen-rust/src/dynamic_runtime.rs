@@ -615,7 +615,15 @@ pub fn __tarvos_method_call(
         }
         (__TarvosValue::List(items), "sort") => {
             let mut items = items.clone();
-            items.sort();
+            items.sort_by(|left, right| {
+                left.partial_cmp(right).unwrap_or_else(|| {
+                    panic!(
+                        "TypeError: '<' not supported between instances of '{}' and '{}'",
+                        left.type_name(),
+                        right.type_name()
+                    )
+                })
+            });
             __TarvosValue::List(items)
         }
         (__TarvosValue::Dict(entries), "keys") => {

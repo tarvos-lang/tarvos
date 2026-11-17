@@ -35,6 +35,21 @@ class PythonAstExporter(ast.NodeVisitor):
             return ""
         return f" at line {line}, column {(column or 0) + 1}"
 
+    @classmethod
+    def require_simple_parameters(cls, arguments, node):
+        if (
+            arguments.posonlyargs
+            or arguments.vararg is not None
+            or arguments.kwonlyargs
+            or arguments.kwarg is not None
+            or arguments.defaults
+            or any(default is not None for default in arguments.kw_defaults)
+        ):
+            raise ValueError(
+                "positional-only, variadic, keyword-only, and default parameters "
+                f"are not supported natively{cls.location(node)}"
+            )
+
     def visit_Module(self, node):
         self.numpy_aliases = {
             alias.asname or alias.name.split(".")[0]
@@ -52,12 +67,11 @@ class PythonAstExporter(ast.NodeVisitor):
         }
 
     def visit_ImportFrom(self, node):
-        if node.module is None:
-            raise ValueError(f"relative imports are not supported{self.location(node)}")
         return {
             "type": "import_from",
-            "module": node.module,
+            "module": node.module or "",
             "names": [{"name": alias.name, "asname": alias.asname} for alias in node.names],
+            "level": node.level,
         }
 
     def visit_Assign(self, node):
@@ -68,12 +82,17 @@ class PythonAstExporter(ast.NodeVisitor):
         return {"type": "assign", "target": self.visit(node.targets[0]), "value": self.visit(node.value)}
 
     def visit_AnnAssign(self, node):
+        annotation = convert_annotation(node.annotation)
+        if annotation is None:
+            raise ValueError(
+                f"unsupported type annotation{self.location(node.annotation)}"
+            )
         target = self.visit(node.target)
         value = self.visit(node.value) if node.value is not None else None
         return {
             "type": "ann_assign",
             "target": target,
-            "annotation": convert_annotation(node.annotation),
+            "annotation": annotation,
             "value": value,
         }
 
@@ -124,6 +143,13 @@ class PythonAstExporter(ast.NodeVisitor):
         return {"type": "expr", "value": self.visit(node.value)}
 
     def visit_ClassDef(self, node):
+        if node.decorator_list or node.keywords or node.bases:
+            raise ValueError(
+                "class decorators, keywords, and inheritance are not supported natively"
+                f"{self.location(node)}"
+            )
+        if getattr(node, "type_params", ()):
+            raise ValueError(f"generic classes are not supported natively{self.location(node)}")
         return {
             "type": "classdef",
             "name": node.name,
@@ -181,6 +207,11 @@ class PythonAstExporter(ast.NodeVisitor):
 
     def visit_Call(self, node):
         if isinstance(node.func, ast.Attribute):
+            if node.keywords:
+                raise ValueError(
+                    "keyword arguments to method calls are not supported natively"
+                    f"{self.location(node)}"
+                )
             if (
                 isinstance(node.func.value, ast.Name)
                 and node.func.value.id in self.numpy_aliases
@@ -223,12 +254,21 @@ class PythonAstExporter(ast.NodeVisitor):
         return {"type": "if", "test": self.visit(node.test), "body": [self.visit(x) for x in node.body], "orelse": [self.visit(x) for x in node.orelse]}
 
     def visit_While(self, node):
+        if node.orelse:
+            raise ValueError(f"while-else is not supported natively{self.location(node)}")
         return {"type": "while", "test": self.visit(node.test), "body": [self.visit(x) for x in node.body]}
 
     def visit_For(self, node):
+        if node.orelse:
+            raise ValueError(f"for-else is not supported natively{self.location(node)}")
         return {"type": "for", "target": self.visit(node.target), "iter": self.visit(node.iter), "body": [self.visit(x) for x in node.body]}
 
     def visit_FunctionDef(self, node):
+        if node.decorator_list:
+            raise ValueError(f"function decorators are not supported natively{self.location(node)}")
+        if getattr(node, "type_params", ()):
+            raise ValueError(f"generic functions are not supported natively{self.location(node)}")
+        self.require_simple_parameters(node.args, node)
         arg_annotations = [convert_annotation(arg.annotation) for arg in node.args.args]
         return {
             "type": "funcdef",
@@ -316,6 +356,7 @@ class PythonAstExporter(ast.NodeVisitor):
         }
 
     def visit_Lambda(self, node):
+        self.require_simple_parameters(node.args, node)
         return {
             "type": "lambda",
             "args": [arg.arg for arg in node.args.args],
@@ -416,19 +457,15 @@ class PythonAstExporter(ast.NodeVisitor):
         return {"type": "format_string", "parts": parts}
 
     def visit_AsyncFunctionDef(self, node):
-        return {
-            "type": "AsyncFunctionDef",
-            "name": node.name,
-            "args": self.visit(node.args),
-            "body": [self.visit(stmt) for stmt in node.body],
-            "decorator_list": [self.visit(dec) for dec in node.decorator_list]
-        }
+        raise ValueError(f"async functions are not supported natively{self.location(node)}")
 
     def visit_Await(self, node):
-        return {
-            "type": "Await",
-            "value": self.visit(node.value)
-        }
+        raise ValueError(f"await expressions are not supported natively{self.location(node)}")
+
+    def generic_visit(self, node):
+        raise ValueError(
+            f"unsupported Python syntax: {type(node).__name__}{self.location(node)}"
+        )
 
 
 

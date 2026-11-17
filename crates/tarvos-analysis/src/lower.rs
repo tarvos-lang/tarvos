@@ -16,6 +16,7 @@ pub struct Lowerer {
     imported_functions: HashMap<String, String>,
     imported_constants: HashMap<String, Value>,
     loop_depth: usize,
+    try_depth: usize,
     current_class: Option<String>,
     /// Element types for list literals that are empty where they are bound.
     ///
@@ -39,6 +40,7 @@ impl Lowerer {
             imported_functions: HashMap::new(),
             imported_constants: HashMap::new(),
             loop_depth: 0,
+            try_depth: 0,
             current_class: None,
             empty_list_hints: HashMap::new(),
         }
@@ -149,6 +151,9 @@ impl Lowerer {
 
     fn lower_stmt(&mut self, stmt: &tarvos_ast::Stmt) -> Result<Stmt> {
         match stmt {
+            tarvos_ast::Stmt::Unsupported { kind } => {
+                bail!("unsupported Python statement ({kind}); use --python-fallback")
+            }
             tarvos_ast::Stmt::Import { names } => {
                 for name in names {
                     if !module_supported(&name.name) {
@@ -342,14 +347,20 @@ impl Lowerer {
                 }
             }
 
-            tarvos_ast::Stmt::Global { .. } | tarvos_ast::Stmt::Nonlocal { .. } => {
-                // Silently accept global/nonlocal declarations
-                Ok(Stmt::Expr(Value::Bool(true)))
-            }
+            tarvos_ast::Stmt::Global { names } => bail!(
+                "global declarations are not supported natively ({}); \
+                 use --python-fallback",
+                names.join(", ")
+            ),
+
+            tarvos_ast::Stmt::Nonlocal { names } => bail!(
+                "nonlocal declarations are not supported natively ({}); \
+                 use --python-fallback",
+                names.join(", ")
+            ),
 
             tarvos_ast::Stmt::Delete { .. } => {
-                // del statement â€” silently ignore (Rust has no explicit free)
-                Ok(Stmt::Expr(Value::Bool(true)))
+                bail!("del statements are not supported natively; use --python-fallback")
             }
 
             tarvos_ast::Stmt::Assert { test, msg } => {
@@ -385,10 +396,16 @@ impl Lowerer {
                         if let tarvos_ast::Expr::Name { id } = function.as_ref() {
                             if id == "print" {
                                 if !keywords.is_empty() {
-                                    // Allow sep/end kwargs but ignore them
-                                    let values_ir: Result<Vec<_>> =
-                                        args.iter().map(|a| self.lower_expr(a)).collect();
-                                    return Ok(Stmt::Print(values_ir?));
+                                    let names = keywords
+                                        .iter()
+                                        .map(|keyword| keyword.arg.as_deref().unwrap_or("**kwargs"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    bail!(
+                                        "print() keyword arguments ({names}) are not supported \
+                                         natively; use print() without keywords or \
+                                         --python-fallback"
+                                    );
                                 }
                                 let values_ir: Result<Vec<_>> =
                                     args.iter().map(|a| self.lower_expr(a)).collect();
@@ -560,6 +577,7 @@ impl Lowerer {
             } => {
                 let parent_context = self.type_context.clone();
                 let parent_loop_depth = self.loop_depth;
+                let parent_try_depth = self.try_depth;
                 let mut function_context = tarvos_ir::TypeContext::new();
                 let mut params = Vec::new();
 
@@ -581,6 +599,7 @@ impl Lowerer {
 
                 self.type_context = function_context;
                 self.loop_depth = 0;
+                self.try_depth = 0;
                 let body_ir: Result<Vec<_>> = body.iter().map(|s| self.lower_stmt(s)).collect();
                 let return_type = returns
                     .as_ref()
@@ -589,6 +608,7 @@ impl Lowerer {
                     .unwrap_or(tarvos_types::Type::None);
                 self.type_context = parent_context;
                 self.loop_depth = parent_loop_depth;
+                self.try_depth = parent_try_depth;
 
                 let param_types: Vec<tarvos_types::Type> =
                     params.iter().map(|(_, ty)| ty.clone()).collect();
@@ -610,6 +630,12 @@ impl Lowerer {
                 Ok(Stmt::Return(value_ir))
             }
             tarvos_ast::Stmt::Break => {
+                if self.try_depth > 0 {
+                    bail!(
+                        "break inside try is not supported natively because it could skip finally; \
+                         use --python-fallback"
+                    );
+                }
                 if self.loop_depth == 0 {
                     bail!("break is only supported inside a loop");
                 }
@@ -621,12 +647,34 @@ impl Lowerer {
             // a silent one.
             tarvos_ast::Stmt::Pass => Ok(Stmt::Pass),
             tarvos_ast::Stmt::Continue => {
+                if self.try_depth > 0 {
+                    bail!(
+                        "continue inside try is not supported natively because it could skip finally; \
+                         use --python-fallback"
+                    );
+                }
                 if self.loop_depth == 0 {
                     bail!("continue is only supported inside a loop");
                 }
                 Ok(Stmt::Continue)
             }
             tarvos_ast::Stmt::Raise { exc } => {
+                if exc.is_none() {
+                    bail!(
+                        "bare raise/re-raise is not supported natively; \
+                         use raise SomeError(...) or --python-fallback"
+                    );
+                }
+                if matches!(
+                    exc,
+                    Some(tarvos_ast::Expr::Call { function, .. })
+                        if matches!(function.as_ref(), tarvos_ast::Expr::Name { id } if id == "KeyError")
+                ) {
+                    bail!(
+                        "raising KeyError is not supported natively because its Python \
+                         string representation is not preserved; use --python-fallback"
+                    );
+                }
                 let exc_ir = exc.as_ref().map(|e| self.lower_expr(e)).transpose()?;
                 Ok(Stmt::Raise(exc_ir))
             }
@@ -636,6 +684,7 @@ impl Lowerer {
                 orelse,
                 finalbody,
             } => {
+                self.try_depth += 1;
                 let body_ir = body
                     .iter()
                     .map(|s| self.lower_stmt(s))
@@ -675,12 +724,14 @@ impl Lowerer {
                     .iter()
                     .map(|s| self.lower_stmt(s))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(Stmt::Try {
+                let lowered = Stmt::Try {
                     body: body_ir,
                     handlers: handlers_ir,
                     orelse: orelse_ir,
                     finalbody: finalbody_ir,
-                })
+                };
+                self.try_depth -= 1;
+                Ok(lowered)
             }
             tarvos_ast::Stmt::With { items, body } => {
                 let mut items_ir = Vec::new();
@@ -1621,13 +1672,6 @@ impl Lowerer {
                 ) {
                     bail!("dictionary keys must have a statically supported scalar type");
                 }
-                // Python dictionaries are heterogeneous: `{"name": "a", "age": 1}`
-                // is ordinary code, so a second value type widens the slot to
-                // `Dynamic` exactly the way a mixed list literal does. Forcing
-                // one type here would reject the most common dict shape there is.
-                //
-                // A single `Unknown` still does not widen — it is absence of
-                // evidence, not evidence of a second type.
                 let mut value_type = Type::Unknown;
                 for value in &values_ir {
                     let ty = self.value_type(value)?;
@@ -1640,6 +1684,12 @@ impl Lowerer {
                         value_type = Type::Dynamic;
                         break;
                     }
+                }
+                if value_type == Type::Dynamic {
+                    bail!(
+                        "heterogeneous dictionary values are not supported by the native backend; \
+                         use a dictionary with one value type or --python-fallback"
+                    );
                 }
                 Ok(Value::Dict {
                     keys: keys_ir,
@@ -1769,8 +1819,19 @@ impl Lowerer {
                         ty: field_type,
                     });
                 }
+                if matches!(&inner, Value::Call { .. }) {
+                    bail!(
+                        "attribute access on a native call result is not supported; \
+                         use indexed access where available or --python-fallback"
+                    );
+                }
                 match &inner {
-                    Value::Name(id) => Ok(Value::Name(format!("{}_{}", id, attr))),
+                    Value::Name(id) => bail!(
+                        "attribute access '{}.{}' is not supported by the native backend; \
+                         use --python-fallback",
+                        id,
+                        attr
+                    ),
                     _ => Ok(Value::Call {
                         function: format!("__getattr_{}", attr),
                         args: vec![inner],
@@ -1822,6 +1883,13 @@ impl Lowerer {
                 let body_ir = self.lower_expr(body)?;
                 let orelse_ir = self.lower_expr(orelse)?;
                 let body_type = self.value_type(&body_ir)?;
+                let orelse_type = self.value_type(&orelse_ir)?;
+                if body_type != orelse_type {
+                    bail!(
+                        "conditional expression branches must have the same native type \
+                         (got {body_type} and {orelse_type}); use --python-fallback"
+                    );
+                }
                 Ok(Value::Call {
                     function: "__ternary".into(),
                     args: vec![test_ir, body_ir, orelse_ir],
@@ -1858,38 +1926,11 @@ impl Lowerer {
                 })
             }
             tarvos_ast::Expr::Set { elements } => {
-                let elements_ir = elements
-                    .iter()
-                    .map(|e| self.lower_expr(e))
-                    .collect::<Result<Vec<_>>>()?;
-                // A single `Unknown` does not widen: `set()` of an unknown
-                // source is still an unknown element, not a mixed one.
-                let mut element_type = Type::Unknown;
-                for element in &elements_ir {
-                    let ty = self.value_type(element)?;
-                    if ty == Type::Unknown {
-                        continue;
-                    }
-                    if element_type == Type::Unknown {
-                        element_type = ty;
-                    } else if ty != element_type {
-                        element_type = Type::Dynamic;
-                        break;
-                    }
-                }
-                // Lowered as a call rather than a new `Value` variant: the IR
-                // has no set node, and a constructor call carries the set type
-                // in `return_type`, which is exactly what `value_type` reads.
-                // The list literal inside it is the source ordering; the
-                // constructor deduplicates and sorts it.
-                Ok(Value::Call {
-                    function: "__tarvos_set_of".to_string(),
-                    args: vec![Value::List {
-                        elements: elements_ir,
-                        element_type: element_type.clone(),
-                    }],
-                    return_type: Type::Set(Box::new(element_type)),
-                })
+                let _ = elements;
+                bail!("set literals are not supported by the native backend; use --python-fallback")
+            }
+            tarvos_ast::Expr::Unsupported { kind } => {
+                bail!("unsupported Python expression ({kind}); use --python-fallback")
             }
             tarvos_ast::Expr::Starred { value } => self.lower_expr(value),
         }
@@ -3394,7 +3435,7 @@ fn static_json_expr(value: &tarvos_ast::Expr) -> Option<String> {
                 .iter()
                 .map(static_json_expr)
                 .collect::<Option<Vec<_>>>()?;
-            Some(format!("[{}]", values.join(",")))
+            Some(format!("[{}]", values.join(", ")))
         }
         tarvos_ast::Expr::Dict { keys, values } => {
             let mut entries = Vec::with_capacity(keys.len());
@@ -3403,12 +3444,12 @@ fn static_json_expr(value: &tarvos_ast::Expr) -> Option<String> {
                     return None;
                 };
                 entries.push(format!(
-                    "\"{}\":{}",
+                    "\"{}\": {}",
                     escape_json_string(key),
                     static_json_expr(value)?
                 ));
             }
-            Some(format!("{{{}}}", entries.join(",")))
+            Some(format!("{{{}}}", entries.join(", ")))
         }
         tarvos_ast::Expr::Unary { operator, operand } if operator == "usub" => {
             let value = static_json_expr(operand)?;
@@ -3437,4 +3478,35 @@ fn escape_json_string(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::static_json_expr;
+    use tarvos_ast::Expr;
+
+    #[test]
+    fn static_json_uses_python_default_separators_and_keeps_key_order() {
+        let value = Expr::Dict {
+            keys: vec![
+                Expr::String {
+                    value: "b".to_owned(),
+                },
+                Expr::String {
+                    value: "a".to_owned(),
+                },
+            ],
+            values: vec![
+                Expr::Int { value: 2 },
+                Expr::List {
+                    elements: vec![Expr::Bool { value: true }, Expr::None],
+                },
+            ],
+        };
+
+        assert_eq!(
+            static_json_expr(&value).as_deref(),
+            Some("{\"b\": 2, \"a\": [true, null]}")
+        );
+    }
 }

@@ -117,8 +117,8 @@ mod pipeline {
         ]}"#;
         let code = compile(ast).expect("static json.dumps should lower natively");
         assert!(
-            code.contains(r#"\"message\":\"hello\\nworld\""#)
-                && code.contains(r#"\"items\":[1,true]"#),
+            code.contains(r#"\"message\": \"hello\\nworld\""#)
+                && code.contains(r#"\"items\": [1, true]"#),
             "generated JSON literal missing or incorrectly escaped:\n{}",
             code
         );

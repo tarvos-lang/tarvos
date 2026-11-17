@@ -16,6 +16,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -116,7 +117,7 @@ def benchmark_nuitka(script: Path, repeats: int):
     nuitka = shutil.which("nuitka")
     if not nuitka:
         return {"runtime": "nuitka", "status": "unavailable", "reason": "Nuitka not installed"}
-    with subprocess.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory() as tmpdir:
         outdir = Path(tmpdir)
         compile_cmd = [nuitka, str(script), "--output-dir", str(outdir), "--assume-yes", "--remove-output"]
         run_checked(compile_cmd, cwd=str(script.parent), env={**os.environ, "BENCH_LIMIT": "10000000", "BENCH_BIAS": "0"})

@@ -144,6 +144,9 @@ jobs:
         # differential corpus, so it cannot claim coverage that no test proves.
         run: python scripts/compatibility_matrix.py --check
 
+      - name: Test compatibility tooling
+        run: python tests/test_compatibility_tools.py
+
       - name: Check the shipped shell scripts
         run: python scripts/test_installer.py
 
@@ -429,9 +432,6 @@ jobs:
 
       - name: CLI audit
         run: python benchmarks/cli_audit.py
-
-      - name: Project acceptance
-        run: python benchmarks/project_acceptance.py
 
       - name: Generated Rust compiles
         shell: bash

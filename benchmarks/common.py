@@ -21,6 +21,10 @@ def safe_tool_roots():
             roots.append(candidate.resolve())
         except FileNotFoundError:
             roots.append(candidate)
+    if os.name == "nt":
+        roots.append((Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32").resolve())
+    else:
+        roots.extend(Path(path).resolve() for path in ["/usr/bin", "/bin", "/usr/local/bin"])
     deduped = []
     for root in roots:
         if root not in deduped:
@@ -79,7 +83,9 @@ def sanitize_environment(base_env=None):
         except OSError:
             continue
         if dir_path.exists() and (
-            dir_path == ROOT or ROOT in dir_path.parents or any(root in dir_path.parents for root in safe_tool_roots()) or "System32" in str(dir_path) or "Windows" in str(dir_path)
+            dir_path == ROOT
+            or ROOT in dir_path.parents
+            or any(root == dir_path or root in dir_path.parents for root in safe_tool_roots())
         ):
             path_entries.append(str(dir_path))
     safe_roots = [str(root) for root in safe_tool_roots() if root.exists()]

@@ -34,14 +34,22 @@ impl Emitter {
         let aliases = module
             .statements
             .iter()
-            .filter_map(|stmt| match stmt {
-                Stmt::Import { module, alias } if module == "numpy" => {
-                    Some((alias.clone(), NativeLibrary::Numpy))
-                }
-                Stmt::Import { module, alias } if module == "pandas" => {
-                    Some((alias.clone(), NativeLibrary::Polars))
-                }
-                _ => None,
+            .flat_map(|stmt| match stmt {
+                Stmt::Import { names } => names
+                    .iter()
+                    .filter_map(|(module, alias)| {
+                        let library = match module.as_str() {
+                            "numpy" => NativeLibrary::Numpy,
+                            "pandas" => NativeLibrary::Polars,
+                            _ => return None,
+                        };
+                        let alias = alias.clone().unwrap_or_else(|| {
+                            module.split('.').next().unwrap_or(module).to_owned()
+                        });
+                        Some((alias, library))
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
             })
             .collect();
         let async_functions = module
@@ -150,8 +158,16 @@ impl Emitter {
             )),
             Stmt::Function { .. } => Err(CodegenError::new("nested functions are unsupported")),
             Stmt::Assign { targets, value } => self.assign(targets, value),
-            Stmt::Expr(Expr::Call { function, args }) if matches!(function.as_ref(), Expr::Name(name) if name == "print") =>
-            {
+            Stmt::Expr(Expr::Call {
+                function,
+                args,
+                keywords,
+            }) if matches!(function.as_ref(), Expr::Name(name) if name == "print") => {
+                if !keywords.is_empty() {
+                    return Err(CodegenError::new(
+                        "`print()` keyword arguments are not supported by this backend",
+                    ));
+                }
                 for arg in args {
                     let value = self.expr(arg)?;
                     self.line(&format!("println!(\"{{}}\", {value});"));
@@ -379,11 +395,32 @@ impl Emitter {
                     self.expr(right)?
                 ))
             }
-            Expr::Call { function, args } => self.call(function, args),
+            Expr::Call {
+                function,
+                args,
+                keywords,
+            } => {
+                if !keywords.is_empty() {
+                    return Err(CodegenError::new(
+                        "keyword arguments are not supported by this backend",
+                    ));
+                }
+                self.call(function, args)
+            }
             Expr::Await(value) => {
-                let Expr::Call { function, args } = value.as_ref() else {
+                let Expr::Call {
+                    function,
+                    args,
+                    keywords,
+                } = value.as_ref()
+                else {
                     return Err(CodegenError::new("await requires a call"));
                 };
+                if !keywords.is_empty() {
+                    return Err(CodegenError::new(
+                        "keyword arguments are not supported by this backend",
+                    ));
+                }
                 let Expr::Name(name) = function.as_ref() else {
                     return Err(CodegenError::new("await requires a named function"));
                 };
@@ -450,6 +487,12 @@ impl Emitter {
                 }
                 Ok(folded)
             }
+            Expr::IfExp { test, body, orelse } => Ok(format!(
+                "{{ if ({}).truthy() {{ {} }} else {{ {} }} }}",
+                self.expr(test)?,
+                self.expr(body)?,
+                self.expr(orelse)?
+            )),
             Expr::Unsupported { kind } => {
                 Err(CodegenError::new(format!("unsupported expression: {kind}")))
             }

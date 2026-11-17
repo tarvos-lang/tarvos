@@ -25,9 +25,115 @@ Nothing here is inferred from the fact that Python parses.
 | `planned` | Intentionally not started. No claim is made. |
 
 ## Current summary
+<!-- compatibility-matrix:start -->
+102 classified features: **14 partial**, **1 planned**, **57 supported**, **30 unsupported**.
 
-72 classified features: **37 supported**, **14 partial**, **20 unsupported**,
-**1 planned**.
+| ID | Category | Feature | Status | Evidence |
+|---|---|---|---|---|
+| `syntax.variables-and-assignment` | syntax | variables and assignment | supported | parity: `03_integer`, `19_scope` |
+| `syntax.arithmetic` | syntax | arithmetic + - * / // % ** | supported | parity: `03_integer` |
+| `syntax.floats` | syntax | floats | supported | parity: `04_float` |
+| `syntax.comparisons` | syntax | comparisons | supported | parity: `06_comparison` |
+| `syntax.boolean-logic-and-or` | syntax | boolean logic and/or | partial | parity: `06_comparison`; rejection: `rejects/non_bool_short_circuit` |
+| `syntax.f-strings` | syntax | f-strings | partial | parity: `52_native_features`; rejection: `rejects/dynamic_fstring_spec` |
+| `syntax.ternary-expression` | syntax | ternary expression | supported | parity: `52_native_features` |
+| `syntax.pass-statement` | syntax | pass statement | supported | parity: `51_pass` |
+| `syntax.membership-in-not-in` | syntax | membership (in/not in) | supported | parity: `50_membership` |
+| `syntax.list-comprehension` | syntax | list comprehension | partial | parity: `52_native_features`; rejection: `rejects/listcomp_tuple_target` |
+| `syntax.heterogeneous-ternary-branches` | syntax | heterogeneous ternary branches | unsupported | rejection: `rejects/heterogeneous_ternary` |
+| `syntax.classes` | syntax | classes | unsupported | rejection: `rejects/class_definition`, `rejects/class_inheritance` |
+| `syntax.lambda` | syntax | lambda | unsupported | rejection: `rejects/lambda_value` |
+| `syntax.generators-decorators-async` | syntax | generators / decorators / async | unsupported | rejection: `rejects/async_function`, `rejects/function_decorator`, `rejects/escaping_generator` |
+| `syntax.global-nonlocal-del` | syntax | global/nonlocal/del | unsupported | rejection: `rejects/global_declaration`, `rejects/nonlocal_declaration`, `rejects/delete_statement` |
+| `control_flow.if-elif-else` | control_flow | if / elif / else | supported | parity: `08_control_flow` |
+| `control_flow.while` | control_flow | while | supported | parity: `08_control_flow` |
+| `control_flow.for` | control_flow | for | supported | parity: `08_control_flow`, `22_data_pipeline` |
+| `control_flow.break-continue` | control_flow | break / continue | supported | parity: `08_control_flow` |
+| `control_flow.nested-control-flow` | control_flow | nested control flow | supported | parity: `08_control_flow`, `19_scope` |
+| `control_flow.for-else-while-else` | control_flow | for-else / while-else | unsupported | rejection: `rejects/loop_else` |
+| `functions.definition-and-calls` | functions | definition and calls | supported | parity: `19_scope` |
+| `functions.multiple-return-paths` | functions | multiple return paths | supported | parity: `19_scope` |
+| `functions.default-and-annotated-parameters` | functions | default and annotated parameters | partial | parity: `52_native_features`; rejection: `rejects/default_parameter` |
+| `functions.args-kwargs` | functions | *args / **kwargs | unsupported | — |
+| `functions.recursion` | functions | recursion | supported | parity: `52_native_features` |
+| `collections.list-literals-and-methods` | collections | list literals and methods | supported | parity: `12_lists` |
+| `collections.empty-list` | collections | empty list | supported | parity: `12_lists` |
+| `collections.negative-indexing` | collections | negative indexing | supported | parity: `13_indexing` |
+| `collections.list-conversion-list` | collections | list conversion list(...) | partial | parity: `14_list_conversion`; rejection: `rejects/list_from_dict` |
+| `collections.tuple` | collections | tuple | supported | parity: `52_native_features` |
+| `collections.dict` | collections | dict | partial | parity: `52_native_features`; rejection: `rejects/heterogeneous_dict` |
+| `collections.set` | collections | set | unsupported | rejection: `rejects/set_literal` |
+| `collections.slicing` | collections | slicing | partial | parity: `52_native_features`; rejection: `rejects/slice_step` |
+| `strings.concatenation-length-indexing` | strings | concatenation, length, indexing | supported | parity: `13_indexing`, `17_strings` |
+| `strings.str-methods` | strings | str methods | supported | parity: `17_strings` |
+| `strings.unicode-indexing` | strings | unicode indexing | supported | parity: `13_indexing` |
+| `integers.bounded-native-arithmetic` | integers | bounded native arithmetic | supported | parity: `03_integer` |
+| `integers.arbitrary-precision` | integers | arbitrary precision | unsupported | — |
+| `integers.floored-modulo-and-division` | integers | floored modulo and division | supported | parity: `03_integer` |
+| `integers.true-division-yields-float` | integers | true division yields float | supported | parity: `03_integer`, `04_float` |
+| `integers.bitwise-and-shift` | integers | bitwise and shift | supported | parity: `03_integer` |
+| `integers.numeric-promotion-int-float` | integers | numeric promotion int/float | supported | parity: `03_integer`, `04_float` |
+| `conversions.int-and-float-from-str` | conversions | int() and float() from str | supported | parity: `04_float` |
+| `conversions.int-float-str-from-scalars` | conversions | int()/float()/str() from scalars | supported | parity: `04_float` |
+| `conversions.bool-truthiness` | conversions | bool() truthiness | supported | parity: `04_float` |
+| `iterators.sum` | iterators | sum() | supported | parity: `43_sum_iteration` |
+| `imports.from-module-import-name` | imports | from module import name | supported | parity: `project_acceptance` |
+| `imports.from-package-import-submodule` | imports | from package import submodule | supported | parity: `project_acceptance` |
+| `imports.relative-imports` | imports | relative imports | partial | parity: `project_acceptance`; rejection: `rejects/deep_relative_import` |
+| `imports.import` | imports | import * | unsupported | — |
+| `imports.import-module-bare` | imports | import module (bare) | partial | parity: `52_native_features`; rejection: `rejects/unsupported_bare_import` |
+| `imports.dynamic-import-importlib` | imports | dynamic import (importlib) | unsupported | — |
+| `imports.circular-imports` | imports | circular imports | unsupported | — |
+| `exceptions.try-except` | exceptions | try / except | supported | parity: `41_exceptions` |
+| `exceptions.except-type` | exceptions | except <Type> | supported | parity: `41_exceptions` |
+| `exceptions.except-as-name` | exceptions | except ... as <name> | supported | parity: `41_exceptions` |
+| `exceptions.else` | exceptions | else | supported | parity: `41_exceptions` |
+| `exceptions.finally` | exceptions | finally | supported | parity: `41_exceptions` |
+| `exceptions.raise` | exceptions | raise | supported | parity: `41_exceptions` |
+| `exceptions.nested-try` | exceptions | nested try | supported | parity: `41_exceptions` |
+| `exceptions.bare-raise-re-raise` | exceptions | bare raise / re-raise | unsupported | rejection: `rejects/bare_raise` |
+| `exceptions.exception-attributes-args-class` | exceptions | exception attributes (args, __class__) | unsupported | — |
+| `exceptions.str-keyerror-quoting` | exceptions | str(KeyError) quoting | unsupported | rejection: `rejects/keyerror_string` |
+| `exceptions.break-continue-inside-try-inside-a-loop` | exceptions | break / continue inside try inside a loop | unsupported | rejection: `rejects/break_in_try_loop` |
+| `language.keyword-arguments` | language | keyword arguments | partial | parity: `52_native_features`; rejection: `rejects/kwargs_expansion` |
+| `language.print-sep-end` | language | print sep/end | unsupported | rejection: `rejects/print_sep`, `rejects/print_end` |
+| `stdlib.math` | stdlib | math | supported | parity: `52_native_features` |
+| `stdlib.time` | stdlib | time | supported | parity: `52_native_features` |
+| `stdlib.json` | stdlib | json | supported | parity: `52_native_features` |
+| `stdlib.json-dumps-on-a-literal` | stdlib | json.dumps on a literal | supported | parity: `52_native_features` |
+| `stdlib.json-dumps-on-a-runtime-value` | stdlib | json.dumps on a runtime value | partial | parity: `04_float`, `52_native_features`; rejection: `rejects/heterogeneous_dict` |
+| `stdlib.os-os-path` | stdlib | os / os.path | partial | parity: `52_native_features`, `53_os_listdir`; rejection: `rejects/os_environ` |
+| `stdlib.statistics-mean-fmean` | stdlib | statistics.mean / fmean | supported | parity: `40_statistics` |
+| `stdlib.statistics-harmonic-mean-geometric-mean` | stdlib | statistics.harmonic_mean / geometric_mean | supported | parity: `40_statistics` |
+| `stdlib.statistics-median` | stdlib | statistics.median | supported | parity: `40_statistics` |
+| `stdlib.statistics-median-low-median-high` | stdlib | statistics.median_low / median_high | supported | parity: `40_statistics` |
+| `stdlib.statistics-mode-multimode` | stdlib | statistics.mode / multimode | supported | parity: `40_statistics` |
+| `stdlib.statistics-pvariance-pstdev` | stdlib | statistics.pvariance / pstdev | supported | parity: `40_statistics` |
+| `stdlib.statistics-variance-stdev` | stdlib | statistics.variance / stdev | supported | parity: `40_statistics` |
+| `stdlib.statistics-median-grouped-quantiles-correlation-covariance-linear-regression` | stdlib | statistics.median_grouped / quantiles / correlation / covariance / linear_regression | partial | parity: `42_statistics_paired`; rejection: `rejects/statistics_quantiles_keyword` |
+| `stdlib.statistics-quantiles-n-method` | stdlib | statistics.quantiles n= / method= | unsupported | rejection: `rejects/statistics_quantiles_keyword` |
+| `stdlib.statistics-linear-regression-result-attributes` | stdlib | statistics.linear_regression result attributes | partial | parity: `42_statistics_paired`; rejection: `rejects/regression_result_attribute` |
+| `stdlib.statistics-statisticserror` | stdlib | statistics.StatisticsError | supported | parity: `41_exceptions` |
+| `stdlib.collections-itertools-functools` | stdlib | collections / itertools / functools | unsupported | — |
+| `stdlib.file-i-o-open` | stdlib | file I/O (open) | unsupported | — |
+| `stdlib.dataclasses-enum-typing` | stdlib | dataclasses / enum / typing | unsupported | — |
+| `numpy.ndarray` | numpy | ndarray | unsupported | — |
+| `pandas.dataframe` | pandas | DataFrame | unsupported | — |
+| `pytorch.tensor` | pytorch | Tensor | unsupported | — |
+| `concurrency.threading-multiprocessing` | concurrency | threading / multiprocessing | unsupported | — |
+| `concurrency.asyncio` | concurrency | asyncio | unsupported | — |
+| `networking.socket-http` | networking | socket / http | unsupported | — |
+| `serialization.pickle` | serialization | pickle | unsupported | — |
+| `project.single-file-compilation` | project | single file compilation | supported | parity: `03_integer`, `10_range` |
+| `project.multi-module-project-compilation` | project | multi-module project compilation | supported | parity: `project_acceptance` |
+| `project.package-directories-with-init-py` | project | package directories with __init__.py | supported | parity: `project_acceptance` |
+| `project.entry-point-selection-entry` | project | entry point selection (--entry) | supported | parity: `project_acceptance` |
+| `project.cargo-project-export` | project | Cargo project export | supported | parity: `project_acceptance` |
+| `project.pyproject-toml-metadata` | project | pyproject.toml metadata | unsupported | — |
+| `project.tarvos-toml-manifest` | project | tarvos.toml manifest | planned | — |
+| `project.resource-bundling` | project | resource bundling | unsupported | — |
+<!-- compatibility-matrix:end -->
+
 ## The limits worth knowing before you write code for Tarvos
 
 These are the ones most likely to surprise, each carried in the matrix with the

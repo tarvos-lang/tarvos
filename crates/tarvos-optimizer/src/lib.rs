@@ -1703,6 +1703,16 @@ impl Optimizer {
                     names.extend(Self::value_names(element));
                 }
             }
+            Value::Tuple { elements, .. } => {
+                for element in elements {
+                    names.extend(Self::value_names(element));
+                }
+            }
+            Value::Dict { keys, values, .. } => {
+                for value in keys.iter().chain(values) {
+                    names.extend(Self::value_names(value));
+                }
+            }
             Value::ListComp {
                 target,
                 iter,
@@ -1775,38 +1785,17 @@ impl Optimizer {
             Value::Binary { left, right, .. } => {
                 Self::is_pure_value(left) && Self::is_pure_value(right)
             }
-            Value::List { elements, .. } => elements.iter().all(Self::is_pure_value),
-            Value::ListComp {
-                iter,
-                element,
-                condition,
-                ..
-            } => {
-                Self::is_pure_value(iter)
-                    && Self::is_pure_value(element)
-                    && condition
-                        .as_ref()
-                        .is_none_or(|value| Self::is_pure_value(value))
-            }
-            Value::Tuple { elements, .. } => elements.iter().all(Self::is_pure_value),
-            Value::Dict { keys, values, .. } => {
-                keys.iter().all(Self::is_pure_value) && values.iter().all(Self::is_pure_value)
-            }
+            // These expressions allocate fresh containers. Reusing an earlier
+            // binding can change aliasing and contents, and their current CSE
+            // keys intentionally do not encode full nested structure.
+            Value::List { .. }
+            | Value::ListComp { .. }
+            | Value::Tuple { .. }
+            | Value::Dict { .. }
+            | Value::Slice { .. } => false,
             Value::Index {
                 container, index, ..
             } => Self::is_pure_value(container) && Self::is_pure_value(index),
-            Value::Slice {
-                container,
-                lower,
-                upper,
-                step,
-                ..
-            } => {
-                Self::is_pure_value(container)
-                    && lower.as_ref().is_none_or(|l| Self::is_pure_value(l))
-                    && upper.as_ref().is_none_or(|u| Self::is_pure_value(u))
-                    && step.as_ref().is_none_or(|s| Self::is_pure_value(s))
-            }
             Value::FormatString { parts } => parts.iter().all(|part| match part {
                 tarvos_ir::FormatPart::Literal(_) => true,
                 tarvos_ir::FormatPart::Value { value, .. } => Self::is_pure_value(value),
@@ -1831,6 +1820,7 @@ impl Optimizer {
                 Stmt::Let { name, ty, value } => {
                     let new_val = Self::cse_substitute(value, &env)?;
                     let val_key = Self::value_key(&new_val);
+                    Self::forget_cse_name(&mut env, name);
                     if Self::is_pure_value(&new_val) {
                         if let Some(existing_name) = env.get(&val_key) {
                             result.push(Stmt::Assign {
@@ -1853,6 +1843,7 @@ impl Optimizer {
                 Stmt::Assign { name, value } => {
                     let new_val = Self::cse_substitute(value, &env)?;
                     let val_key = Self::value_key(&new_val);
+                    Self::forget_cse_name(&mut env, name);
                     if Self::is_pure_value(&new_val) {
                         if let Some(existing_name) = env.get(&val_key) {
                             result.push(Stmt::Assign {
@@ -1871,10 +1862,17 @@ impl Optimizer {
                         value: new_val,
                     });
                 }
-                _ => result.push(stmt.clone()),
+                _ => {
+                    env.clear();
+                    result.push(stmt.clone());
+                }
             }
         }
         Ok(result)
+    }
+
+    fn forget_cse_name(env: &mut HashMap<String, String>, name: &str) {
+        env.retain(|_, existing_name| existing_name != name);
     }
 
     /// Serialize a value to a string key for CSE lookup.
@@ -2305,6 +2303,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cse_invalidates_rebound_values_and_control_flow() {
+        let module = Module {
+            statements: vec![
+                Stmt::Let {
+                    name: "value".into(),
+                    ty: Type::Int,
+                    value: Value::Int(0),
+                },
+                Stmt::Assign {
+                    name: "value".into(),
+                    value: Value::Int(5),
+                },
+                Stmt::Let {
+                    name: "before_loop".into(),
+                    ty: Type::Int,
+                    value: Value::Int(0),
+                },
+                Stmt::While {
+                    test: Value::Binary {
+                        left: Box::new(Value::Name("value".into())),
+                        op: BinaryOp::Lt,
+                        right: Box::new(Value::Int(10)),
+                        ty: Type::Bool,
+                    },
+                    body: vec![Stmt::Assign {
+                        name: "value".into(),
+                        value: Value::Binary {
+                            left: Box::new(Value::Name("value".into())),
+                            op: BinaryOp::Add,
+                            right: Box::new(Value::Int(1)),
+                            ty: Type::Int,
+                        },
+                    }],
+                },
+                Stmt::Let {
+                    name: "after_loop".into(),
+                    ty: Type::Int,
+                    value: Value::Int(0),
+                },
+            ],
+        };
+
+        let optimized = Optimizer::common_subexpression_elimination(&module).unwrap();
+        assert!(matches!(
+            &optimized.statements[2],
+            Stmt::Let { value: Value::Int(0), .. }
+        ));
+        assert!(matches!(
+            &optimized.statements[4],
+            Stmt::Let { value: Value::Int(0), .. }
+        ));
+    }
+
+    #[test]
+    fn cse_does_not_merge_fresh_container_literals() {
+        let module = Module {
+            statements: vec![
+                Stmt::Let {
+                    name: "first".into(),
+                    ty: Type::Array(Box::new(Type::Int)),
+                    value: Value::List {
+                        elements: vec![Value::Int(1)],
+                        element_type: Type::Int,
+                    },
+                },
+                Stmt::Let {
+                    name: "second".into(),
+                    ty: Type::Array(Box::new(Type::Int)),
+                    value: Value::List {
+                        elements: vec![Value::Int(2)],
+                        element_type: Type::Int,
+                    },
+                },
+            ],
+        };
+
+        let optimized = Optimizer::common_subexpression_elimination(&module).unwrap();
+        assert!(matches!(
+            &optimized.statements[1],
+            Stmt::Let {
+                name,
+                value: Value::List { elements, .. },
+                ..
+            } if name == "second" && matches!(elements.as_slice(), [Value::Int(2)])
+        ));
+    }
+
     /// The same reasoning for the direct block case, without a function or loop.
     #[test]
     fn a_tuple_assignment_clears_the_constant_in_its_own_block() {
@@ -2359,6 +2445,37 @@ mod tests {
         assert_eq!(optimized.statements.len(), 2);
         assert!(matches!(optimized.statements[0], Stmt::Let { ref name, .. } if name == "keep"));
         assert!(matches!(optimized.statements[1], Stmt::Print(ref v) if v.len() == 1));
+    }
+
+    #[test]
+    fn retains_bindings_referenced_from_tuples_and_dictionaries() {
+        let module = Module {
+            statements: vec![
+                Stmt::Let {
+                    name: "value".into(),
+                    ty: Type::Int,
+                    value: Value::Int(4),
+                },
+                Stmt::Print(vec![
+                    Value::Tuple {
+                        elements: vec![Value::Name("value".into())],
+                        element_types: vec![Type::Int],
+                    },
+                    Value::Dict {
+                        keys: vec![Value::String("answer".into())],
+                        values: vec![Value::Name("value".into())],
+                        key_type: Type::String,
+                        value_type: Type::Int,
+                    },
+                ]),
+            ],
+        };
+
+        let optimized = Optimizer::dead_code_elimination(&module).unwrap();
+        assert!(matches!(
+            optimized.statements.first(),
+            Some(Stmt::Let { name, .. }) if name == "value"
+        ));
     }
 
     #[test]

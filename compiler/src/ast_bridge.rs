@@ -14,15 +14,11 @@ pub struct Diagnostic {
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Import {
-        module: String,
-        alias: String,
+        names: Vec<(String, Option<String>)>,
     },
     /// `from <module> import a, b`
     ///
-    /// A relative import (`level > 0`, e.g. `from . import x`) is deliberately
-    /// rejected: resolving it needs the importing file's package context, which
-    /// this bridge does not have. Reporting it is better than guessing a module
-    /// name and generating a call to something that does not exist.
+    /// Relative imports retain their level for the project resolver.
     ImportFrom {
         module: String,
         names: Vec<String>,
@@ -153,6 +149,11 @@ pub enum Expr {
         operator: String,
         values: Vec<Expr>,
     },
+    IfExp {
+        test: Box<Expr>,
+        body: Box<Expr>,
+        orelse: Box<Expr>,
+    },
     FormatString(Vec<FormatPart>),
     Compare {
         left: Box<Expr>,
@@ -162,6 +163,7 @@ pub enum Expr {
     Call {
         function: Box<Expr>,
         args: Vec<Expr>,
+        keywords: Vec<(Option<String>, Expr)>,
     },
     Attribute {
         object: Box<Expr>,
@@ -266,12 +268,38 @@ struct AstBridge {
     diagnostics: Vec<Diagnostic>,
 }
 impl AstBridge {
-    fn bad_stmt(&mut self, stmt: &pyast::Stmt) -> Stmt {
-        let kind = format!("{stmt:?}");
+    fn unsupported_stmt(&mut self, kind: String, message: impl Into<String>) -> Stmt {
         self.diagnostics.push(Diagnostic {
-            message: format!("unsupported statement retained safely: {kind}"),
+            message: message.into(),
         });
         Stmt::Unsupported { kind }
+    }
+
+    fn bad_stmt(&mut self, stmt: &pyast::Stmt) -> Stmt {
+        let kind = format!("{stmt:?}");
+        match stmt {
+            pyast::Stmt::Global(_) => self.unsupported_stmt(
+                kind,
+                "`global` declarations are not supported natively; use --python-fallback",
+            ),
+            pyast::Stmt::Nonlocal(_) => self.unsupported_stmt(
+                kind,
+                "`nonlocal` declarations are not supported natively; use --python-fallback",
+            ),
+            pyast::Stmt::Delete(_) => self.unsupported_stmt(
+                kind,
+                "`del` statements are not supported natively; use --python-fallback",
+            ),
+            pyast::Stmt::ClassDef(_) => self.unsupported_stmt(
+                kind,
+                "class definitions are not supported by the default Ruff front end; \
+                 use --python-fallback",
+            ),
+            _ => self.unsupported_stmt(
+                kind.clone(),
+                format!("unsupported statement retained safely: {kind}"),
+            ),
+        }
     }
     /// Materialize a literal f-string format specification (`:.4f`, `:,.2f`, `:05d`).
     ///
@@ -348,6 +376,13 @@ impl AstBridge {
         Expr::Unsupported { kind }
     }
 
+    fn unsupported_expr(&mut self, kind: String, message: impl Into<String>) -> Expr {
+        self.diagnostics.push(Diagnostic {
+            message: message.into(),
+        });
+        Expr::Unsupported { kind }
+    }
+
     /// Combine a comprehension's `if` clauses into a single condition.
     fn comprehension_condition(&mut self, ifs: &[pyast::Expr]) -> Option<Box<Expr>> {
         match ifs.len() {
@@ -410,6 +445,7 @@ impl AstBridge {
             current = Expr::Call {
                 function: Box::new(Expr::Name("__tarvos_flatten".to_string())),
                 args: vec![rows],
+                keywords: Vec::new(),
             };
         }
         Some(current)
@@ -485,6 +521,7 @@ impl AstBridge {
                 Expr::Call {
                     function: Box::new(self.expr(&arguments.args[0])),
                     args: vec![Expr::Name("__tarvos_item".to_string())],
+                    keywords: Vec::new(),
                 },
             ),
             _ => return None,
@@ -532,6 +569,7 @@ impl AstBridge {
                     body: Box::new(body),
                 },
             ],
+            keywords: Vec::new(),
         })
     }
 
@@ -585,18 +623,18 @@ impl AstBridge {
     }
     fn stmt(&mut self, stmt: &pyast::Stmt) -> Stmt {
         match stmt {
-            pyast::Stmt::Import(node) => {
-                let Some(alias) = node.names.first() else {
-                    return self.bad_stmt(stmt);
-                };
-                let module = alias.name.as_str().to_owned();
-                let alias = alias
-                    .asname
-                    .as_ref()
-                    .map(|name| name.as_str().to_owned())
-                    .unwrap_or_else(|| module.split('.').next().unwrap_or(&module).to_owned());
-                Stmt::Import { module, alias }
-            }
+            pyast::Stmt::Import(node) => Stmt::Import {
+                names: node
+                    .names
+                    .iter()
+                    .map(|alias| {
+                        (
+                            alias.name.as_str().to_owned(),
+                            alias.asname.as_ref().map(|name| name.as_str().to_owned()),
+                        )
+                    })
+                    .collect(),
+            },
             pyast::Stmt::ImportFrom(node) => {
                 // A star import cannot be resolved to a known set of names.
                 if node.names.iter().any(|alias| alias.name.as_str() == "*") {
@@ -609,19 +647,14 @@ impl AstBridge {
                         kind: "ImportFrom(star)".to_owned(),
                     };
                 }
-                // A bare `from import x` has no module and cannot be resolved.
-                let module = match node.module.as_ref() {
-                    Some(name) => name.as_str().to_owned(),
-                    None => {
-                        self.diagnostics.push(Diagnostic {
-                            message: "`from import ...` without a module is not supported natively"
-                                .to_owned(),
-                        });
-                        return Stmt::Unsupported {
-                            kind: "ImportFrom(no module)".to_owned(),
-                        };
-                    }
-                };
+                let module = node
+                    .module
+                    .as_ref()
+                    .map(|name| name.as_str().to_owned())
+                    .unwrap_or_default();
+                if module.is_empty() && node.level == 0 {
+                    return self.bad_stmt(stmt);
+                }
                 let names = node
                     .names
                     .iter()
@@ -636,22 +669,61 @@ impl AstBridge {
                     level: node.level,
                 }
             }
-            pyast::Stmt::FunctionDef(node) => Stmt::Function {
-                name: node.name.as_str().to_owned(),
-                params: node
-                    .parameters
-                    .iter()
-                    .map(|param| param.name().as_str().to_owned())
-                    .collect(),
-                param_annotations: node
-                    .parameters
-                    .iter()
-                    .map(|param| param.annotation().and_then(Self::annotation_text))
-                    .collect(),
-                returns: node.returns.as_deref().and_then(Self::annotation_text),
-                is_async: node.is_async,
-                body: self.suite(&node.body),
-            },
+            pyast::Stmt::FunctionDef(node) => {
+                if node.is_async {
+                    return self.unsupported_stmt(
+                        format!("async function {}", node.name),
+                        "async functions are not supported natively; use --python-fallback",
+                    );
+                }
+                if !node.decorator_list.is_empty() {
+                    return self.unsupported_stmt(
+                        format!("decorated function {}", node.name),
+                        "function decorators are not supported natively; use --python-fallback",
+                    );
+                }
+                if node.type_params.is_some() {
+                    return self.unsupported_stmt(
+                        format!("generic function {}", node.name),
+                        "generic functions are not supported natively; use --python-fallback",
+                    );
+                }
+                if !node.parameters.posonlyargs.is_empty()
+                    || node.parameters.vararg.is_some()
+                    || !node.parameters.kwonlyargs.is_empty()
+                    || node.parameters.kwarg.is_some()
+                    || node
+                        .parameters
+                        .iter()
+                        .any(|param| param.default().is_some())
+                {
+                    return self.unsupported_stmt(
+                        format!("function parameters for {}", node.name),
+                        "function defaults and variadic parameters are not supported natively; \
+                         use --python-fallback",
+                    );
+                }
+                Stmt::Function {
+                    name: node.name.as_str().to_owned(),
+                    params: node
+                        .parameters
+                        .iter()
+                        .map(|param| param.name().as_str().to_owned())
+                        .collect(),
+                    param_annotations: node
+                        .parameters
+                        .iter()
+                        .map(|param| param.annotation().and_then(Self::annotation_text))
+                        .collect(),
+                    returns: node.returns.as_deref().and_then(Self::annotation_text),
+                    is_async: false,
+                    body: self.suite(&node.body),
+                }
+            }
+            pyast::Stmt::Assign(node) if node.targets.len() != 1 => self.unsupported_stmt(
+                "chained assignment".to_owned(),
+                "multiple assignment targets are not supported natively; use --python-fallback",
+            ),
             pyast::Stmt::Assign(node) => Stmt::Assign {
                 targets: node
                     .targets
@@ -712,15 +784,27 @@ impl AstBridge {
                     orelse: tail,
                 }
             }
+            pyast::Stmt::While(node) if !node.orelse.is_empty() => self.unsupported_stmt(
+                "while-else".to_owned(),
+                "while-else suites are not supported natively; use --python-fallback",
+            ),
             pyast::Stmt::While(node) => Stmt::While {
                 test: self.expr(&node.test),
                 body: self.suite(&node.body),
             },
+            pyast::Stmt::For(node) if node.is_async => self.unsupported_stmt(
+                "async for".to_owned(),
+                "async for loops are not supported natively; use --python-fallback",
+            ),
+            pyast::Stmt::For(node) if !node.orelse.is_empty() => self.unsupported_stmt(
+                "for-else".to_owned(),
+                "for-else suites are not supported natively; use --python-fallback",
+            ),
             pyast::Stmt::For(node) => Stmt::For {
                 target: self.expr(&node.target),
                 iter: self.expr(&node.iter),
                 body: self.suite(&node.body),
-                is_async: node.is_async,
+                is_async: false,
             },
             pyast::Stmt::Return(node) => {
                 Stmt::Return(node.value.as_deref().map(|value| self.expr(value)))
@@ -869,6 +953,7 @@ impl AstBridge {
                     Some(comprehension) => Expr::Call {
                         function: Box::new(Expr::Name("__tarvos_dict_of".to_string())),
                         args: vec![comprehension],
+                        keywords: Vec::new(),
                     },
                     None => self.bad_expr(expr),
                 }
@@ -896,6 +981,11 @@ impl AstBridge {
                 }
                 .to_string(),
                 values: value.values.iter().map(|value| self.expr(value)).collect(),
+            },
+            pyast::Expr::If(value) => Expr::IfExp {
+                test: Box::new(self.expr(&value.test)),
+                body: Box::new(self.expr(&value.body)),
+                orelse: Box::new(self.expr(&value.orelse)),
             },
             pyast::Expr::FString(value) => {
                 let mut parts = Vec::new();
@@ -1002,19 +1092,28 @@ impl AstBridge {
                         _ => {}
                     }
                 }
-                // A keyword argument is currently dropped by the bridge, which is
-                // worse than an error: `quantiles(data, n=2)` would silently
-                // compile as `quantiles(data)`. Reporting it routes the program
-                // down the explicit compatibility path instead of producing a
-                // native binary that quietly computes something else.
+                // The shared MethodCall node has no keyword slots. Reject those
+                // calls here rather than dropping the keywords in conversion.
                 if !v.arguments.keywords.is_empty() {
-                    self.diagnostics.push(Diagnostic {
-                        message: format!(
-                            "keyword arguments are not yet lowered natively \
+                    let is_print = matches!(
+                        v.func.as_ref(),
+                        pyast::Expr::Name(name) if name.id.as_str() == "print"
+                    );
+                    if is_print {
+                        self.diagnostics.push(Diagnostic {
+                            message: "`print()` keyword arguments such as `sep` and `end` are not \
+                                      supported natively; use --python-fallback"
+                                .to_owned(),
+                        });
+                    } else if matches!(v.func.as_ref(), pyast::Expr::Attribute(_)) {
+                        self.diagnostics.push(Diagnostic {
+                            message: format!(
+                            "keyword arguments to attribute calls are not yet lowered natively \
                              (call has {} keyword argument(s))",
                             v.arguments.keywords.len()
                         ),
-                    });
+                        });
+                    }
                 }
                 Expr::Call {
                     function: Box::new(self.expr(&v.func)),
@@ -1024,13 +1123,27 @@ impl AstBridge {
                         .iter()
                         .map(|value| self.expr_consuming(value))
                         .collect(),
+                    keywords: v
+                        .arguments
+                        .keywords
+                        .iter()
+                        .map(|keyword| {
+                            (
+                                keyword.arg.as_ref().map(|name| name.as_str().to_owned()),
+                                self.expr(&keyword.value),
+                            )
+                        })
+                        .collect(),
                 }
             }
             pyast::Expr::Attribute(v) => Expr::Attribute {
                 object: Box::new(self.expr(&v.value)),
                 attribute: v.attr.as_str().to_owned(),
             },
-            pyast::Expr::Await(v) => Expr::Await(Box::new(self.expr(&v.value))),
+            pyast::Expr::Await(_) => self.unsupported_expr(
+                "await expression".to_owned(),
+                "await expressions are not supported natively; use --python-fallback",
+            ),
             _ => self.bad_expr(expr),
         }
     }
@@ -1065,7 +1178,9 @@ mod tests {
             &module.statements[2],
             Stmt::For {
                 target: Expr::Name(name),
-                iter: Expr::Call { function, args },
+                iter: Expr::Call {
+                    function, args, ..
+                },
                 ..
             } if name == "item"
                 && matches!(function.as_ref(), Expr::Name(name) if name == "range")
@@ -1193,5 +1308,36 @@ mod tests {
             .statements
             .iter()
             .any(|statement| matches!(statement, Stmt::Unsupported { .. })));
+    }
+
+    #[test]
+    fn preserves_direct_call_keywords_and_rejects_unsupported_keyword_shapes() {
+        let direct = parse_python("result = combine(right=2, left=1)\n")
+            .expect("valid direct function call should parse");
+        assert!(direct.diagnostics.is_empty());
+        assert!(matches!(
+            &direct.statements[0],
+            Stmt::Assign {
+                value: Expr::Call { keywords, .. },
+                ..
+            } if keywords.len() == 2
+                && keywords[0].0.as_deref() == Some("right")
+                && keywords[1].0.as_deref() == Some("left")
+        ));
+
+        let print = parse_python("print('x', end='')\n").expect("print call should parse");
+        assert!(
+            print
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("keyword arguments such as")),
+            "{:?}",
+            print.diagnostics
+        );
+
+        let method = parse_python("items.sort(reverse=True)\n").expect("method should parse");
+        assert!(method.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("keyword arguments to attribute calls")));
     }
 }
